@@ -36,6 +36,15 @@ class CrossEntropy(Loss):
     def __call__(self, logits, targets, **kwargs):
         return self.loss(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
 
+class WeightedCrossEntropyCOIN(Loss):
+    def __init__(self):
+        self.loss = None
+
+    def __call__(self, logits, targets, **kwargs):
+        w = torch.ones(779, requires_grad=False).to(device=logits.device, dtype=logits.dtype)
+        w[0] = 1/59.0
+        self.loss = nn.CrossEntropyLoss(weight=w)
+        return self.loss(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
 
 class ArgmaxCrossEntropy(Loss):
     def __init__(self):

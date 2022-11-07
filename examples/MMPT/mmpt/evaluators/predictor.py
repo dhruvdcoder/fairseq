@@ -367,18 +367,21 @@ class COINPredictor(Predictor):
         # this is not a loss but just compute neg_log_prob.
         Y_pred = []
         Y_true = []
+        vid_id = []
         with torch.no_grad():
             for batch in eval_dataloader:
-                self(batch, model, Y_pred, Y_true)
-        return self.finalize(Y_pred, Y_true, output_file)
+                self(batch, model, Y_pred, Y_true, vid_id=vid_id)
+        return self.finalize(Y_pred, Y_true, video_id=vid_id,output_file=output_file, pred_file="preds.json", id2label=eval_dataloader.dataset.meta_processor.id2label)
 
-    def __call__(self, sample, model, Y_pred, Y_true):
+    def __call__(self, sample, model, Y_pred, Y_true, vid_id=None):
         sample = self.to_ctx(sample)
         # compute the average logits over sliding windows.
         output = model(**sample)
         logits = self._merge_windows(sample, output)
         Y_pred.append(logits.argmax(dim=1))
         Y_true.append(sample["video_targets"].squeeze(0).cpu())
+        if vid_id is not None:
+            vid_id.append(sample['video_id'][0])
 
     def _merge_windows(self, sample, output):
         targets = sample["targets"].reshape(-1).cpu()
@@ -407,7 +410,22 @@ class COINPredictor(Predictor):
         assert logits.size() == (video_len, batch_logits.size(1)), "{}, {}".format(logits.size(), video_len)
         return logits
 
-    def finalize(self, Y_pred, Y_true, output_file=None):
+    def finalize(self, Y_pred, Y_true, video_id, output_file=None, pred_file=None, id2label=None):
+        if pred_file is not None:
+            preds = []
+            if id2label is not None:
+                def id2label_(ids):
+                    return [id2label[i] for i in ids ]
+            else:
+                def id2label_(ids):
+                    return ids
+            assert len(Y_pred) == len(Y_true)
+            assert len(Y_pred) == len(video_id)
+            for p, t, i in zip(Y_pred, Y_true, video_id):
+                preds.append({"idx": i, "y_pred": id2label_(p.tolist()), "y_true": id2label_(t.tolist())})
+
+            with open(os.path.join(self.pred_dir, pred_file), 'w') as f:
+                json.dump(preds, f, indent=2)
         Y_pred = torch.cat(Y_pred, dim=0).numpy()
         Y_true = torch.cat(Y_true, dim=0).numpy()
         assert len(Y_pred) == len(Y_true)
@@ -457,9 +475,10 @@ class COINZSPredictor(COINPredictor):
         # this is not a loss but just compute neg_log_prob.
         Y_pred = []
         Y_true = []
+        vid_id = []
         with torch.no_grad():
             for batch in eval_dataloader:
-                self(batch, label_hidden_states, model, lbd, Y_pred, Y_true)
+                self(batch, label_hidden_states, model, lbd, Y_pred, Y_true, vid_id)
         return self.finalize(Y_pred, Y_true, output_file)
 
     def reshape_subsample(self, sample):
@@ -473,7 +492,7 @@ class COINZSPredictor(COINPredictor):
             tensor = tensor.squeeze(0)
         return tensor
 
-    def __call__(self, sample, label_hidden_states, model, lbd, Y_pred, Y_true):
+    def __call__(self, sample, label_hidden_states, model, lbd, Y_pred, Y_true, vid_id):
         sample = self.reshape_subsample(sample)
         sample = self.to_ctx(sample)
         # compute the average logits over sliding windows.

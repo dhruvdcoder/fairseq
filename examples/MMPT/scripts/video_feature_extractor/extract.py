@@ -15,6 +15,7 @@ from random_sequence_shuffler import RandomSequenceSampler
 from tqdm import tqdm
 from pathbuilder import PathBuilder
 from videoreader import VideoLoader
+from pathlib import Path
 
 
 parser = argparse.ArgumentParser(description='Easy video feature extractor')
@@ -106,7 +107,7 @@ with th.no_grad():
     for k, data in tqdm(enumerate(loader), total=loader.__len__(), ascii=True):
         input_file = data['input'][0]
         output_file = data['output'][0]
-        if len(data['video'].shape) > 3:
+        if len(data['video'].shape) > 3 and (not Path(output_file).exists()):
             video = data['video'].squeeze()
             if len(video.shape) == 4:
                 video = preprocess(video)
@@ -153,5 +154,7 @@ with th.no_grad():
                     else:
                         features = features.astype('float32')
                 np.save(output_file, features)
+        elif Path(output_file).exists():
+            print(f"{output_file} exists. Skipping.")
         else:
             print('Video {} error.'.format(input_file))

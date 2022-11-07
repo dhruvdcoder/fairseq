@@ -694,6 +694,9 @@ class COINActionSegmentationMetaProcessor(MetaProcessor):
                     id2label[int(segment["id"])] = segment["label"]
         # text_labels is used for ZS setting
         self.text_labels = ["none"] * len(id2label)
+        print(f"len(text_labels): {len(self.text_labels)}")
+        print(f"len(id2label): {len(id2label)}")
+        print(f"id2label.keys: {id2label.keys()}")
         for label_id in id2label:
             self.text_labels[label_id-1] = id2label[label_id]
 
@@ -736,6 +739,71 @@ class COINActionSegmentationMetaProcessor(MetaProcessor):
     def __getitem__(self, idx):
         return self.data[idx]
 
+
+class COINActionSegmentationMetaProcessorNewSplit(MetaProcessor):
+    split_map = {
+        "train": "training",
+        "valid": "testing",
+        "test": "testing",
+    }
+
+    def __init__(self, config):
+        super().__init__(config)
+        with open(self._get_split_path(config)) as fr:
+            database = json.load(fr)["database"]
+        id2label = {}
+        data = []
+        # filter the data by split.
+        for video_id, rec in database.items():
+            # always use testing to determine label_set
+            for segment in rec["annotation"]:
+                id2label[int(segment["id"])] = segment["label"]
+        # text_labels is used for ZS setting
+        self.text_labels = ["none"] * len(id2label)
+        print(f"len(text_labels): {len(self.text_labels)}")
+        print(f"len(id2label): {len(id2label)}")
+        print(f"id2label.keys: {id2label.keys()}")
+        for label_id in id2label:
+            self.text_labels[label_id-1] = id2label[label_id]
+
+        id2label[0] = "O"
+        print("num of labels", len(id2label))
+        for video_id, rec in database.items():
+            if not os.path.isfile(os.path.join(config.vfeat_dir, video_id + ".npy")):
+                continue
+            if rec["subset"] == COINActionSegmentationMetaProcessor.split_map[self.split]:
+                starts, ends, labels = [], [], []
+                for segment in rec["annotation"]:
+                    start, end = segment["segment"]
+                    label = int(segment["id"])
+                    starts.append(start)
+                    ends.append(end)
+                    labels.append(label)
+                data.append(
+                    (video_id, {"start": starts, "end": ends, "label": labels}))
+        self.data = data
+        self.id2label = id2label
+    
+    def meta_text_labels(self, config):
+        from transformers import default_data_collator
+        from ..utils import get_local_rank
+
+        text_processor = TextProcessor(config)
+        binarizer = MetaTextBinarizer(config)
+        # TODO: add prompts to .yaml.
+        text_labels = [label for label in self.text_labels]
+
+        if get_local_rank() == 0:
+            print(text_labels)
+
+        outputs = []
+        for text_label in text_labels:
+            text_feature = text_processor(text_label)
+            outputs.append(binarizer(text_feature))
+        return default_data_collator(outputs)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
 
 class COINActionSegmentationTextProcessor(TextProcessor):
     def __call__(self, text_label):
