@@ -9,6 +9,7 @@ import os
 import pickle
 import random
 import math
+from typing import Set
 import numpy as np
 import torch
 
@@ -23,6 +24,8 @@ from .processor import (
 )
 
 from .how2processor import TextGenerationProcessor
+from pathlib import Path
+import re
 
 
 # ------------- A General Aligner for all downstream tasks-----------------
@@ -543,6 +546,7 @@ class CrossTaskMetaProcessor(MetaProcessor):
         return A, M
 
 
+
 class CrossTaskVideoProcessor(VideoProcessor):
     def __call__(self, video_fn):
         task, vid, steps, n_steps = video_fn
@@ -655,6 +659,131 @@ class CrossTaskAligner(Aligner):
                 Y[start:end, step] = 1
         return Y
 
+
+class CrossTaskActionSegmentationMetaProcessor(MetaProcessor):
+    split_map = {'train': ['train.txt', 'validation.txt'], 'valid': ['test.txt'], 'test': ['test.txt']}
+    def __init__(self, config):
+        super().__init__(config)
+        np.random.seed(0)  # deterministic random split.
+        # TODO: Just create one list of vids that have features.
+        # replace the csv with our test.txt.
+        self.annotation_path = config.annotation_path
+        task_vids = self._get_vids(
+            config.train_csv_path,
+            config.vfeat_dir,
+            config.annotation_path)
+
+        val_vids = self._get_vids(
+            config.val_csv_path,
+            config.vfeat_dir,
+            config.annotation_path)
+        for k, v in val_vids.items():
+            if k in task_vids:
+                task_vids[k].extend(val_vids)
+            else:
+                task_vids[k] = v
+        # TODO: primary_info is a dict with keys 'title', 'url', 'n_steps', 'steps'.
+        # with values being dict of task_id: title (Dict[str, str]), task_id: url (Dict[str, str]), task_id: int (Dict[str, int]), task_id: list of steps (Dict[str, List[str]])
+        primary_info = self._read_task_info(config.primary_path)
+        related_info = self._read_task_info(config.related_path)
+        task_steps = {**primary_info['steps'], **related_info['steps']}
+        n_steps = {**primary_info['n_steps'], **related_info['n_steps']} # Dict[str, List[str]] were keys are task_id and values are list of actions for the task
+        all_tasks = set(n_steps.keys()) # all task ids
+        # vocab-by-step matrix (A) and vocab (M)
+        # (huxu): we do not use BoW.
+        split_vid_ids = []
+        for file in self.split_map[config.split]:
+            with open(Path(config.train_csv_path).parent / file) as f:
+                for line in f:
+                    split_vid_ids.append(line.strip())
+        split_vid_ids = set(split_vid_ids)
+        # TODO: remove splitting
+        self.vids = []
+        for task, vids in task_vids.items():
+            self.vids.extend([(task, vid) for vid in vids if vid in split_vid_ids])
+        # self.vids is a list of tuples (task_id, vid_id)
+        self.task_steps = task_steps
+        self.n_steps = n_steps
+        self.data = []
+        self.id2label = {0: "O"}
+        self.label2id = {"O": 0}
+        self.step_id_in_task_to_global_id = {}
+        for task, task_steps in self.task_steps.items():
+            for local_step_idx, step in enumerate(task_steps):
+                if step not in self.label2id:
+                    idx = len(self.label2id)
+                    self.label2id[step] = idx
+                    self.id2label[idx] = step
+                else:
+                    idx = self.label2id[step]
+                self.step_id_in_task_to_global_id[(task, local_step_idx)] = idx
+
+        for task, vid in self.vids:
+            self.data.append((vid, self._read_annon(task, vid)))
+
+    def _read_annon(self, task, vid):
+        path = os.path.join(self.annotation_path, task + '_' + vid + '.csv')
+        annon = {'start': [], 'end': [], 'label': []}
+        with open(path, 'r') as f:
+            for line in f:
+                step, start, end = line.strip().split(',')
+                annon['start'].append(int(math.floor(float(start))))
+                annon['end'].append(int(math.ceil(float(end))))
+                annon['label'].append(int(self.step_id_in_task_to_global_id[(task, int(step)-1)]))
+        return annon
+    
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+    def __len__(self):
+        return len(self.data)
+
+    def _get_vids(self, path, vfeat_dir, annotation_path):
+        """refactored from
+        https://github.com/DmZhukov/CrossTask/blob/master/data.py
+        changes: add `vfeat_dir` to check if the video is available.
+        add `annotation_path` to check if the video is available.
+        """
+
+        task_vids = {}
+        with open(path, 'r') as f:
+            for line in f:
+                task, vid, url = line.strip().split(',')
+                # double check the video is available.
+                if not os.path.exists(
+                        os.path.join(vfeat_dir, vid + ".npy")):
+                    continue
+                # double check the annotation is available.
+                if not os.path.exists(os.path.join(
+                        annotation_path,
+                        task + "_" + vid + ".csv")):
+                    continue
+                if task not in task_vids:
+                    task_vids[task] = []
+                task_vids[task].append(vid)
+        return task_vids
+
+    def _read_task_info(self, path):
+        titles = {}
+        urls = {}
+        n_steps = {}
+        steps = {}
+        with open(path, 'r') as f:
+            idx = f.readline()
+            while idx != '':
+                idx = idx.strip()
+                titles[idx] = f.readline().strip()
+                urls[idx] = f.readline().strip()
+                n_steps[idx] = int(f.readline().strip())
+                steps[idx] = f.readline().strip().split(',')
+                next(f)
+                idx = f.readline()
+        return {
+            'title': titles,
+            'url': urls,
+            'n_steps': n_steps,
+            'steps': steps
+        }
 
 # --------------------- COIN -------------------------
 
@@ -807,7 +936,7 @@ class COINActionSegmentationMetaProcessorNewSplit(MetaProcessor):
 
 class COINActionSegmentationTextProcessor(TextProcessor):
     def __call__(self, text_label):
-        return text_label
+        return text_label # {'start': [21.0, 23.0, 25.0], 'end': [22.0, 24.0, 26.0], 'label': [373, 374, 375]}
 
 
 class COINActionSegmentationAligner(Aligner):
@@ -817,6 +946,7 @@ class COINActionSegmentationAligner(Aligner):
         self.sliding_window_size = config.sliding_window_size
 
     def __call__(self, video_id, video_feature, text_feature):
+        # {'start': [21.0, 23.0, 25.0], 'end': [22.0, 24.0, 26.0], 'label': [373, 374, 375]}
         starts, ends, label_ids = text_feature["start"], text_feature["end"], text_feature["label"]
         # sliding window.
         video_len = len(video_feature)
